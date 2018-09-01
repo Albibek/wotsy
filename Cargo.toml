@@ -1,0 +1,23 @@
+[package]
+name = "wotsy"
+version = "0.1.0"
+authors = ["Sergey Noskov <snoskov@avito.ru>"]
+description = "Zero knowlege short-living secret sharing service"
+license-file = "LICENSE"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "^0.2"
+wee_alloc = "^0.4"
+console_error_panic_hook = "0.1"
+scrypt = { version = "^0.1", features = ["base64", "constant_time_eq"], default-features = false }
+itoa = { version = "^0.4", default-features = false }
+rand_core = { version = "^0.2", default-features = false }
+base64 = "^0.9"
+aes = "^0.2"
+block-modes = "^0.1"
+serde="^1"
+serde_derive="^1"
+serde_json="^1"
