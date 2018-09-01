@@ -6,8 +6,9 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 extern crate rand;
+
+extern crate tokio;
 extern crate tokio_fs;
-extern crate tokio_io;
 
 extern crate base64;
 
@@ -23,29 +24,76 @@ use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use hyper_staticfile::ResolveResult;
 
+use tokio::runtime::current_thread::Runtime;
+use tokio::timer::Interval;
+
 use rand::{thread_rng, Rng};
+use std::fs::{self, File};
 use std::io::{self, Write};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NOTFOUND: &[u8] = b"Not Found";
 static STATIC: &str = "/pkg/";
 static DATA_URL: &str = "/s/";
 static DATA_DIR: &str = "data/";
-static TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+//static TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+static TIMEOUT: Duration = Duration::from_secs(30);
 
 fn main() {
-    //pretty_env_logger::init_custom_env("RUST_LOG=debug");
     pretty_env_logger::init();
 
-    let addr = "127.0.0.1:9999".parse().unwrap();
+    let mut threads = Vec::new();
+    let gc = thread::Builder::new()
+        .name("wotsy-gc".into())
+        .spawn(move || {
+            let mut runtime = Runtime::new().unwrap();
+            let dur = Duration::from_secs(10);
+            let timer = Interval::new(Instant::now() + dur, dur).for_each(|_| {
+                //
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
 
-    let server = Server::bind(&addr)
-        .serve(|| service_fn(response))
-        .map_err(|e| eprintln!("server error: {}", e));
+                let paths = fs::read_dir(DATA_DIR).unwrap();
+                for path in paths {
+                    let path = path.unwrap();
+                    warn!("checking: {:?}", path.path());
+                    if path.file_type().unwrap().is_file() {
+                        let f = File::open(path.path()).unwrap();
 
-    println!("Listening on http://{}", addr);
+                        let secret: Secret = serde_json::from_reader(f).unwrap();
+                        if secret.timeout <= now {
+                            warn!("Removing: {:?}", path.path());
+                            fs::remove_file(path.path()).unwrap();
+                        }
+                    }
+                }
 
-    hyper::rt::run(server);
+                Ok(())
+            });
+
+            runtime.block_on(timer).unwrap();
+        })
+        .unwrap();
+    threads.push(gc);
+    let server = thread::Builder::new()
+        .name("wotsy-http".into())
+        .spawn(move || {
+            let addr = "127.0.0.1:9999".parse().unwrap();
+
+            let server = Server::bind(&addr)
+                .serve(|| service_fn(response))
+                .map_err(|e| eprintln!("server error: {}", e));
+            //println!("Listening on http://{}", addr);
+            hyper::rt::run(server);
+        })
+        .unwrap();
+    threads.push(server);
+    for t in threads {
+        t.join().unwrap();
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -106,13 +154,43 @@ fn response(mut req: Request<Body>) -> ResponseFuture {
         }
 
         (Method::GET, ref path) if path.starts_with(DATA_URL) => {
-            // FIXME: retrieve data
-            Box::new(future::ok(
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(NOTFOUND.into())
-                    .unwrap(),
-            ))
+            let mut filename = String::new();
+            filename.push_str(DATA_DIR);
+            filename.push_str(&path[DATA_URL.len()..]);
+            filename.push_str(".secret");
+            match File::open(filename) {
+                // TODO unwrap
+                Ok(f) => {
+                    let secret: Secret = serde_json::from_reader(f).unwrap();
+
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if secret.timeout <= now {
+                        Box::new(future::ok(
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(NOTFOUND.into())
+                                .unwrap(),
+                        ))
+                    } else {
+                        let serialized = serde_json::to_string(&secret).unwrap();
+                        Box::new(future::ok(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .body(serialized.into())
+                                .unwrap(),
+                        ))
+                    }
+                }
+                Err(_) => Box::new(future::ok(
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(NOTFOUND.into())
+                        .unwrap(),
+                )),
+            }
         }
         (Method::GET, _) => Box::new(future::ok(
             Response::builder()
@@ -140,7 +218,7 @@ fn response(mut req: Request<Body>) -> ResponseFuture {
                     filename.push_str(&id);
                     filename.push_str(".secret");
                     warn!("F: {:?}", filename);
-                    let mut file = std::fs::File::create(filename).unwrap();
+                    let mut file = File::create(filename).unwrap();
                     file.write(&data).unwrap();
                     // body
                     future::ok(id)

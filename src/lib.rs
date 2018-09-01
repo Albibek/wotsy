@@ -9,7 +9,7 @@ extern crate base64;
 extern crate block_modes;
 extern crate itoa;
 extern crate rand_core;
-extern crate scrypt;
+//extern crate scrypt;
 
 #[macro_use]
 extern crate serde_derive;
@@ -22,13 +22,12 @@ pub use console_error_panic_hook::set_once as set_panic_hook;
 use wasm_bindgen::prelude::*;
 
 use aes::block_cipher_trait::generic_array::GenericArray;
-use aes::block_cipher_trait::BlockCipher;
 use aes::Aes256;
 use block_modes::block_padding::Padding;
 use block_modes::block_padding::Pkcs7;
 use block_modes::{BlockMode, BlockModeIv, Cbc};
 
-use scrypt::{scrypt, ScryptParams};
+//use scrypt::{scrypt, ScryptParams};
 
 use base64::URL_SAFE_NO_PAD;
 
@@ -50,9 +49,7 @@ extern "C" {
     #[wasm_bindgen(js_namespace = Math)]
     fn random() -> f64;
 
-    fn set_key(k: &str);
-
-    fn efetch(url: &str, data: &[u8]);
+    fn efetch(url: &str, method: &str, data: &[u8], fu: usize);
 
     type HTMLDocument;
     static document: HTMLDocument;
@@ -68,6 +65,9 @@ extern "C" {
 
     #[wasm_bindgen(method, structural, indexing_getter)]
     fn get(this: &Element, prop: &str) -> String;
+
+    #[wasm_bindgen(method, structural, indexing_setter)]
+    fn set_str(this: &Element, prop: &str, value: &str);
 
     #[wasm_bindgen(method, setter = innerHTML)]
     fn set_inner_html(this: &Element, html: &str);
@@ -90,12 +90,24 @@ extern "C" {
 
 }
 
-static URL: &str = "http://127.0.0.1:9999";
+static BASEURL: &str = "http://127.0.0.1:9999";
+static DATAURL: &str = "/s/";
 
 #[wasm_bindgen]
 pub fn init() {
     set_panic_hook();
-    log("HI");
+    let hash = &document.hget("window").child("location").get("hash");
+
+    if hash.len() == 0 || hash == "#" {
+        visible("secret_form", true);
+    } else {
+        visible("decrypted", true);
+        let mut url = String::new();
+        url.push_str(DATAURL);
+        hash[1..].split(":").next().map(|id| url.push_str(id));
+
+        efetch(&url, "GET", &[], 1);
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -107,6 +119,7 @@ struct Secret {
 #[wasm_bindgen]
 pub fn encrypt() {
     let o = document.get("secret").get("value");
+
     let mut secret = o.clone().into_bytes();
 
     let mut rng = BlockRng::new(JSRngCore);
@@ -124,10 +137,6 @@ pub fn encrypt() {
     let len = secret.len();
     let mut cipher = Aes256Cbc::new_fixkey(&key, &iv);
 
-    log(&String::from_utf8_lossy(&secret));
-    log(&encode_bytes(&secret));
-    log(&format!("{:?}", len));
-
     secret.resize(len + 16, 0);
 
     let mut padded = {
@@ -135,7 +144,7 @@ pub fn encrypt() {
         Pkcs7::pad(&mut secret, len, 16).unwrap()
     };
 
-    set_key(&encode_bytes(&key));
+    set_hash(&encode_bytes(&key));
     cipher.encrypt_nopad(&mut padded).unwrap();
 
     let secret = Secret {
@@ -143,47 +152,81 @@ pub fn encrypt() {
         payload: encode_bytes(&padded),
     };
     let data = serde_json::to_string(&secret).unwrap();
-    efetch("/create", &data.into_bytes());
+    efetch("/create", "POST", &data.into_bytes(), 0);
+}
+
+pub fn set_hash(value: &str) {
+    document
+        .hget("window")
+        .child("location")
+        .set_str("hash", value);
 }
 
 #[wasm_bindgen]
-pub fn links(response: &str) {
-    let hash = &document.hget("window").child("location").get("hash");
-    let href = format!("{}/s/{}{}", URL, response, hash);
-    document
-        .get("link_card")
-        .h_set_inner_html(&format!("<a href=\"{}\">{}</a>", href, href));
-    let o = document.get("links").set_list("classList", Box::new([]));
-    let form_classes = document.get("secret_form").get_list("classList");
-    let mut form_classes: Vec<JsValue> = form_classes.into();
-    form_classes.push("uk-hidden".into());
+pub fn links(response: String) {
+    // FIXME sanitize input
+    let hash: &str = &document.hget("window").child("location").get("hash");
+    let mut href = String::new();
+    href.push_str(BASEURL);
+    href.push_str("#");
+    href.push_str(&response);
+    href.push_str(":");
 
-    document
-        .get("secret_form")
-        .set_list("classList", form_classes.into());
+    href.push_str(&hash[1..]);
 
-    log("RESP");
-    log(&format!("{:?}", o));
-    //
+    let mut inner = String::new();
+    inner.push_str("<a href=\"");
+    inner.push_str(&href);
+    inner.push_str("\">");
+    inner.push_str(&href);
+    inner.push_str("</a>");
+
+    document.get("link_card").h_set_inner_html(&inner);
+    visible("secret_form", false);
+    visible("link", true);
+    set_hash("");
+}
+
+pub fn visible(id: &str, visible: bool) {
+    let classes = document.get(id).get_list("classList");
+    let mut classes: Vec<JsValue> = classes.into();
+    if visible {
+        let class_js: JsValue = "uk-hidden".into();
+        let pos: Option<usize> = classes.iter().position(|class| class == &class_js);
+        if let Some(pos) = pos {
+            classes.swap_remove(pos);
+        }
+    } else {
+        classes.push("uk-hidden".into());
+    }
+    document.get(id).set_list("classList", classes.into());
 }
 
 #[wasm_bindgen]
-pub fn decrypt() {
+pub fn decrypt(data: String) {
     let hash = &document.hget("window").child("location").get("hash");
     if !hash.starts_with("#") || hash.len() < 1 {
         return;
     }
 
-    let key = &hash[1..];
-    log("HASH");
+    let key = decode_bytes(&hash[1..].split(":").skip(1).next().unwrap());
     log(hash);
+    let secret: Secret = serde_json::from_str(&data).unwrap();
+    log(&data);
+    log(&secret.payload);
+    let iv = decode_bytes(&secret.iv);
+    let mut data = decode_bytes(&secret.payload);
 
-    //let mut cipher = Aes256Cbc::new_fixkey(&key, &iv);
+    let key = GenericArray::from_slice(&key);
+    let iv = GenericArray::from_slice(&iv);
 
-    //cipher.decrypt_nopad(&mut padded).unwrap();
-    //let res = Pkcs7::unpad(&mut pggadded).unwrap();
+    let mut cipher = Aes256Cbc::new_fixkey(&key, &iv);
 
-    //log(&encode_bytes(&res));
+    cipher.decrypt_nopad(&mut data).unwrap();
+    let res = Pkcs7::unpad(&mut data).unwrap();
+    let res = String::from_utf8_lossy(res);
+
+    document.get("decrypted_secret").h_set_inner_html(&res);
 }
 
 fn decode_bytes(data: &str) -> Vec<u8> {
@@ -192,13 +235,6 @@ fn decode_bytes(data: &str) -> Vec<u8> {
 
 fn encode_bytes(data: &[u8]) -> String {
     return base64::encode_config(&data, URL_SAFE_NO_PAD);
-}
-
-fn format_bytes(out: &[u8]) -> String {
-    //let mut print_res = String::new();
-    //out.iter().map(|b| itoa::fmt(&mut print_res, *b)).last();
-    //return print_res;
-    return base64::encode(&out);
 }
 
 struct JSRngCore;
