@@ -8,19 +8,6 @@
     <script src='pkg/wotsy.js'></script>
     <script>
         w = wasm_bindgen
-
-        callbacks = [w.links, w.decrypt]
-        function efetch(url, method, data, id) {
-            params = {
-                method: method,
-            };
-            if (method == "POST") {
-                params.body = data
-            };
-            fetch(url,params)
-            .then((response) => response.text(), (reason) => alert(reason))
-            .then((text)=>callbacks[id](text), (reason) => alert(reason));
-        }
         wasm_bindgen('pkg/wotsy_bg.wasm')
         .then(() => { wasm_bindgen.init();}, (reason) => alert(reason))
     </script>
