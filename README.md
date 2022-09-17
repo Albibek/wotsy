@@ -1,3 +1,6 @@
+# DEPRECATION WARNING
+This project was made for concept demonstration purposes, and is not actively supported at the moment. It may contain crates with security vulnerabilities.
+
 # Wotsy
 The privacy-oriented one-time-secret service in Rust and Webassembly
 
